@@ -4,10 +4,10 @@ from scipy.linalg import eigh
 import cmath
 
 # ----- Preparation -----
-N = 6
-g = 1.0
-J = 1.0
-h = 1.2
+N = 8
+g = 1
+J = 1
+h = 1
 
 sx = np.array([[0, 1], [1, 0]], dtype=complex)
 sy = np.array([[0, -1j], [1j, 0]], dtype=complex)
@@ -127,9 +127,10 @@ for j in range(N):
 sigmax_exp /= N
 sigmaz_exp /= N
 
-threshold = 1e-10
-
 # ----- Output Formatting -----
+
+'''
+threshold = 1e-10
 def Format_complex(z, threshold=1e-10):
     real_part = z.real
     imag_part = z.imag
@@ -144,3 +145,8 @@ def Format_complex(z, threshold=1e-10):
 print(f"\n(2) Ground_State_energy_per_site= {E_per_site}")
 print(f"(2) Ground_State_sigmax_per_site= {Format_complex(sigmax_exp, threshold)}")
 print(f"(2) Ground_State_sigmaz_per_site= {Format_complex(sigmaz_exp, threshold)}")
+'''
+
+print(f"\n(2) Ground_State_energy_per_site= {E_per_site}")
+print(f"(2) Ground_State_sigmax_per_site= ({sigmax_exp.real} + {sigmax_exp.imag}j)")
+print(f"(2) Ground_State_sigmaz_per_site= ({sigmaz_exp.real} + {sigmaz_exp.imag}j)")
