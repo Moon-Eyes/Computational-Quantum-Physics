@@ -63,7 +63,7 @@ T = np.zeros((dim, dim), dtype=complex)
 
 for i in range(dim):
     config = [(i >> bit) & 1 for bit in range(N)]
-    translated_config = config[-1:] + config[:-1]
+    translated_config = config[1:] + config[:1]
     
     j = sum(bit << pos for pos, bit in enumerate(translated_config))
     T[j, i] = 1.0
@@ -76,10 +76,10 @@ for ki in range(N):
     momentum_sectors[ki] = []
 
 for i, eigenvalue in enumerate(eigvals_T):
-    phase = cmath.phase(eigenvalue)
-    if phase < 0:
-        phase += 2 * np.pi
-    k_index = round(phase * N / (2 * np.pi)) % N
+    abs_phase = -cmath.phase(eigenvalue)
+    if abs_phase < 0:
+        abs_phase += 2 * np.pi
+    k_index = round(abs_phase * N / (2 * np.pi)) % N
     momentum_sectors[k_index].append(i)
 
 print(f"Case: g={g} J={J} h={h} Ns={N}\n")
