@@ -1,5 +1,5 @@
 
-## note file for `Nsite_ring.py`
+## Notes on `Nsite_ring.py`
 
 ---
 
@@ -128,11 +128,11 @@ In the end, to prominent the output, we build a function ```Format_complex``` wi
 
 ---
 
-### 4. Numerical Results and Analysis
+### 3. Numerical Results and Analysis
 
-The output in cases \( g = J = h = 1, N = 8 \) is :
+The output in cases \( g = J = h = 1, N = 8 \)  :
 
-![运行结果]{output.png}
+![Energy dispersion of spin chain](output.png)
 
 #### (1) Spectrum Interpretation
 
@@ -142,18 +142,13 @@ The smooth variation with \(k\) implies quasi-particle-like excitations, similar
 #### (2) Ground-State Properties
 
 - The lowest eigenvalue **-11.97450070** (ground state energy in total) appears at **\(k=0\)**, meaning that the ground state preserves translational symmetry.  
-- The expectation value \(\langle \sigma^x \rangle \approx 0.457\) indicates partial alignment along the transverse field.  
+- The expectation value \(\langle \sigma^x \rangle \approx 0.457\) indicates partial alignment along the transverse field, say the polarization.
 - \(\langle \sigma^z \rangle \approx 0\) suggests no longitudinal magnetization, showing the field dominates the spin order.
 - Imaginary shows no contribution to the expection of observations.
-  
+
 ---
 
-### 5. Summary
+### 4. Summary
 
 This work implemented a complete diagonalization of a quantum spin chain with periodic boundary conditions.  
 Through translation symmetry, the computation was simplified by dividing the Hilbert space into momentum sectors.
-
-**Key insights:**  
-1. Ground state lies in \(k=0\) sector (uniform phase).
-2. Transverse field polarizes spins in \(x\)-direction.  
-3. The momentum-resolved spectrum reflects the collective excitations of the system.
