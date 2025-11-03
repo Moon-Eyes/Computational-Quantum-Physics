@@ -1,36 +1,10 @@
-#!/usr/bin/env python3
-"""
-finite DMRG for H = - sum (sigma_x sigma_x + g sigma_y sigma_y)
-Compute ground state energy and entanglement entropy S(L).
-Save and plot S(L). Fit S(L) for m=20, g=1.0 to extract central charge c.
-
-This script is adapted from simple_dmrg_02_finite_system.py with modifications:
- - model replaced by XX (xx-yy with coefficient g) model: H_ij = -(sx sx + g sy sy)
- - during single_dmrg_step, compute and record entanglement entropy S(L)
- - run parameter scans required by the homework
-"""
-
+from __future__ import print_function, division
 import numpy as np
-from scipy.sparse import kron, identity, csr_matrix
+from scipy.sparse import kron, identity, csr_matrix, isspmatrix
 from scipy.sparse.linalg import eigsh
 import matplotlib.pyplot as plt
-from math import sin, pi, log
-import os
+from scipy.optimize import curve_fit
 
-# ----- Model: Pauli matrices -----
-sx = np.array([[0.0, 1.0], [1.0, 0.0]], dtype='d')
-sy = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype='complex128')
-id1 = np.eye(2, dtype='d')
-
-# We'll keep operators as dense numpy arrays for simplicity (small tutorial sizes).
-# But use sparse kron for larger sizes when building superblock.
-# Note: use complex dtype for matrices because sy is complex.
-def H2(sx1, sy1, sx2, sy2, g):
-    # two-site coupling operator for the bond joining two blocks/sites
-    # H_bond = -( sx1 ⊗ sx2 + g * sy1 ⊗ sy2 )
-    return -(np.kron(sx1, sx2) + g * np.kron(sy1, sy2))
-
-# ----- Data structures -----
 from collections import namedtuple
 Block = namedtuple("Block", ["length", "basis_size", "operator_dict"])
 EnlargedBlock = namedtuple("EnlargedBlock", ["length", "basis_size", "operator_dict"])
@@ -40,311 +14,349 @@ def is_valid_block(block):
         if op.shape[0] != block.basis_size or op.shape[1] != block.basis_size:
             return False
     return True
+is_valid_enlarged_block = is_valid_block
 
-# initial single-site block
-initial_block_template = Block(length=1, basis_size=2, operator_dict={
-    "H": np.zeros((2,2), dtype='complex128'),
-    "conn_sx": sx.astype('complex128'),
-    "conn_sy": sy.astype('complex128'),
+model_d = 2
+
+Sp1 = np.array([[0, 1], [0, 0]], dtype='d')
+Sm1 = np.array([[0, 0], [1, 0]], dtype='d')
+H1 = np.array([[0, 0], [0, 0]], dtype='d')
+
+initial_block = Block(length=1, basis_size=model_d, operator_dict={
+    "H": H1,
+    "conn_Sp": Sp1,
+    "conn_Sm": Sm1,
 })
 
-# enlarge block by one site
+def H2(Sp1, Sm1, Sp2, Sm2, g):
+    # Ensure inputs can be sparse or dense; use scipy.sparse.kron for consistency
+    # But return dense or sparse consistently to caller.
+    A = kron(Sp1 + Sm1, Sp2 + Sm2)
+    B = -kron(Sp1 - Sm1, Sp2 - Sm2)
+    return -(A + g * B)
+
 def enlarge_block(block, g):
     mblock = block.basis_size
     o = block.operator_dict
-    # Kron products: new basis = block ⊗ site
-    H_new = np.kron(o["H"], np.eye(2, dtype='complex128')) + np.kron(np.eye(mblock, dtype='complex128'), np.zeros((2,2),dtype='complex128')) \
-            + H2(o["conn_sx"], o["conn_sy"], sx.astype('complex128'), sy.astype('complex128'), g)
-    conn_sx_new = np.kron(np.eye(mblock, dtype='complex128'), sx.astype('complex128'))
-    conn_sy_new = np.kron(np.eye(mblock, dtype='complex128'), sy.astype('complex128'))
-    opdict = {"H": H_new, "conn_sx": conn_sx_new, "conn_sy": conn_sy_new}
-    return EnlargedBlock(length=block.length+1, basis_size=mblock*2, operator_dict=opdict)
+
+    # New site operators (dense)
+    Sp1_site = np.array([[0, 1], [0, 0]], dtype='d')
+    Sm1_site = np.array([[0, 0], [1, 0]], dtype='d')
+    H1_site = np.array([[0, 0], [0, 0]], dtype='d')
+
+    # Build enlarged operators. Use sparse identity for kron with existing operators.
+    # Ensure o["H"] might be sparse or dense; convert to sparse when needed.
+    left_H = kron(o["H"], identity(model_d))
+    right_H = kron(identity(mblock), H1_site)
+    conn_term = H2(o["conn_Sp"], o["conn_Sm"], Sp1_site, Sm1_site, g)
+
+    H_enl = left_H + right_H + conn_term
+
+    # conn operators of enlarged block (dense ndarray)
+    conn_Sp_enl = kron(identity(mblock), Sp1_site)
+    conn_Sm_enl = kron(identity(mblock), Sm1_site)
+
+    # Convert all to csr sparse for consistency (H may be sparse)
+    if not isspmatrix(H_enl):
+        H_enl = csr_matrix(H_enl)
+    else:
+        H_enl = H_enl.tocsr()
+    if not isspmatrix(conn_Sp_enl):
+        conn_Sp_enl = csr_matrix(conn_Sp_enl)
+    else:
+        conn_Sp_enl = conn_Sp_enl.tocsr()
+    if not isspmatrix(conn_Sm_enl):
+        conn_Sm_enl = csr_matrix(conn_Sm_enl)
+    else:
+        conn_Sm_enl = conn_Sm_enl.tocsr()
+
+    enlarged_operator_dict = {
+        "H": H_enl,
+        "conn_Sp": conn_Sp_enl,
+        "conn_Sm": conn_Sm_enl,
+    }
+
+    return EnlargedBlock(length=(block.length + 1),
+                         basis_size=(block.basis_size * model_d),
+                         operator_dict=enlarged_operator_dict)
+
 
 def rotate_and_truncate(operator, transformation_matrix):
-    # operator (dense) rotated to new truncated basis: T^† O T
-    # transformation_matrix: shape (old_dim, new_dim)
-    return transformation_matrix.conj().T.dot(operator.dot(transformation_matrix))
+    """
+    Perform U^\dagger O U and return dense ndarray result.
+    Ensure operator is ndarray (dense) before multiplication.
+    transformation_matrix is ndarray with shape (old_dim, new_dim).
+    """
+    # If operator is sparse, convert to dense ndarray
+    if isspmatrix(operator):
+        op = operator.toarray()
+    else:
+        op = np.asarray(operator)
+
+    # Ensure transformation matrix is complex dtype for safety
+    U = np.asarray(transformation_matrix, dtype=complex)
+    # U^\dagger O U
+    return (U.conj().T).dot(op.dot(U))
+
 
 def single_dmrg_step(sys, env, m, g):
     """
-    Perform single DMRG step for system sys and environment env with parameter g.
-    Returns: new_sys_block (truncated), energy (superblock ground energy),
-             entropy (for the enlarged system size = sys_enl.length), and the evals of rho (for debugging)
+    Single DMRG step: enlarge blocks, build superblock H, find ground state,
+    compute reduced density matrix for system, do truncation & return new block.
     """
     assert is_valid_block(sys)
     assert is_valid_block(env)
 
+    # Enlarge
     sys_enl = enlarge_block(sys, g)
     if sys is env:
         env_enl = sys_enl
     else:
         env_enl = enlarge_block(env, g)
 
-    assert is_valid_block(sys_enl)
-    assert is_valid_block(env_enl)
+    assert is_valid_enlarged_block(sys_enl)
+    assert is_valid_enlarged_block(env_enl)
 
-    # Build superblock Hamiltonian as sparse Kronecker to allow eigsh
-    H_sys = csr_matrix(sys_enl.operator_dict["H"])
-    H_env = csr_matrix(env_enl.operator_dict["H"])
+    # Build superblock Hamiltonian (sparse CSR)
     m_sys_enl = sys_enl.basis_size
     m_env_enl = env_enl.basis_size
-    I_sys = identity(m_sys_enl, format='csr', dtype='complex128')
-    I_env = identity(m_env_enl, format='csr', dtype='complex128')
+    sys_enl_op = sys_enl.operator_dict
+    env_enl_op = env_enl.operator_dict
 
-    # bond operator between sys_enl right edge and env_enl left edge
-    # get conn operators
-    conn_sx_sys = csr_matrix(sys_enl.operator_dict["conn_sx"])
-    conn_sy_sys = csr_matrix(sys_enl.operator_dict["conn_sy"])
-    conn_sx_env = csr_matrix(env_enl.operator_dict["conn_sx"])
-    conn_sy_env = csr_matrix(env_enl.operator_dict["conn_sy"])
-    # build H2 term as sparse using kron
-    Hbond = kron(conn_sx_sys, conn_sx_env, format='csr') + g * kron(conn_sy_sys, conn_sy_env, format='csr')
-    Hbond = -Hbond  # include minus sign
+    H_sys = sys_enl_op["H"]
+    H_env = env_enl_op["H"]
+    # Ensure csr
+    if not isspmatrix(H_sys):
+        H_sys = csr_matrix(H_sys)
+    else:
+        H_sys = H_sys.tocsr()
+    if not isspmatrix(H_env):
+        H_env = csr_matrix(H_env)
+    else:
+        H_env = H_env.tocsr()
 
-    superH = kron(H_sys, I_env, format='csr') + kron(I_sys, H_env, format='csr') + Hbond
+    superblock_hamiltonian = kron(H_sys, identity(m_env_enl)) + kron(identity(m_sys_enl), H_env) \
+                             + H2(sys_enl_op["conn_Sp"], sys_enl_op["conn_Sm"],
+                                  env_enl_op["conn_Sp"], env_enl_op["conn_Sm"], g)
+    if not isspmatrix(superblock_hamiltonian):
+        superblock_hamiltonian = csr_matrix(superblock_hamiltonian)
+    else:
+        superblock_hamiltonian = superblock_hamiltonian.tocsr()
 
-    # Ensure hermiticity (small sym)
-    superH = (superH + superH.getH()) * 0.5
+    # Find ground state (k=1). eigsh returns (eigvals, eigvecs) where eigvecs columns are eigenvectors.
+    eigvals, eigvecs = eigsh(superblock_hamiltonian, k=1, which="SA")
+    energy = float(eigvals[0])
+    psi = eigvecs[:, 0]  # explicit 1D vector
 
-    # find ground state with ARPACK (smallest algebraic)
-    # for complex Hermitian, eigsh works; use which='SA' (smallest algebraic)
-    try:
-        evals_small, evecs = eigsh(superH, k=1, which='SA', return_eigenvectors=True)
-    except Exception as e:
-        # fallback: convert to dense (only for very small dims)
-        print("eigsh failed, converting to dense (dims = {},{}). Exception: {}".format(m_sys_enl, m_env_enl, e))
-        superH_dense = superH.toarray()
-        evals_full, evecs_full = np.linalg.eigh(superH_dense)
-        e0 = evals_full[0]
-        psi0 = evecs_full[:,0]
-        evecs = psi0.reshape((-1,1))
-        evals_small = np.array([e0])
+    # Reshape psi into matrix of shape (m_sys_enl, m_env_enl) with C-ordering
+    psi_mat = psi.reshape((m_sys_enl, m_env_enl), order='C')
 
-    energy = float(evals_small[0])
-    psi0 = evecs[:,0]  # shape (m_sys_enl*m_env_enl,)
+    # Reduced density matrix for system: rho_sys = psi_mat @ psi_mat^\dagger
+    rho = np.dot(psi_mat, psi_mat.conj().T)
+    # Ensure hermitian numeric symmetry
+    rho = (rho + rho.conj().T) / 2.0
 
-    # Build psi as matrix of shape (sys_enl.basis, env_enl.basis).
-    # Due to kron ordering used, psi0 is in column-major order for env index varying fastest if constructed via kron(sys_enl, env_enl).
-    # We reshape with order='F' to make psi matrix where rows correspond to system index.
-    psi_mat = psi0.reshape((sys_enl.basis_size, env_enl.basis_size), order='F')
-
-    # reduced density matrix for system: rho = psi_mat @ psi_mat^†
-    rho = psi_mat.dot(psi_mat.conj().T)
-
-    # diagonalize rho
-    evals_rho, evecs_rho = np.linalg.eigh(rho)  # evals in ascending order
+    # Diagonalize rho (dense)
+    evals, evecs = np.linalg.eigh(rho)
     # sort descending
-    idx = np.argsort(evals_rho)[::-1]
-    evals_rho = evals_rho[idx]
-    evecs_rho = evecs_rho[:, idx]
+    idx = np.argsort(evals)[::-1]
+    evals = evals[idx]
+    evecs = evecs[:, idx]
 
-    # compute entanglement entropy S = -sum p ln p (natural log)
-    eps = 1e-12
-    probs = np.real_if_close(evals_rho)
-    probs[probs < 0] = 0.0
-    probs = probs / np.sum(probs)  # normalize (just in case of numeric)
-    mask = probs > eps
-    S = -np.sum(probs[mask] * np.log(probs[mask]))
+    # Entanglement entropy
+    entropy = 0.0
+    for val in evals:
+        if val > 1e-12:
+            entropy -= val * np.log(val)
 
-    # Build transformation matrix from the top-m eigenvectors (the columns of evecs_rho)
-    my_m = min(len(probs), m)
-    transformation_matrix = evecs_rho[:, :my_m]  # shape (sys_enl.basis_size, my_m)
+    # Truncation: keep the largest m eigenstates
+    my_m = min(len(evals), m)
+    transformation_matrix = np.asarray(evecs[:, :my_m], dtype=complex, order='F')
 
-    # rotate and truncate operators for the new truncated block
-    new_ops = {}
+    # Rotate and truncate operators (convert to dense inside)
+    new_operator_dict = {}
     for name, op in sys_enl.operator_dict.items():
-        new_ops[name] = rotate_and_truncate(op, transformation_matrix)
+        new_operator_dict[name] = rotate_and_truncate(op, transformation_matrix)
 
-    newblock = Block(length=sys_enl.length, basis_size=my_m, operator_dict=new_ops)
+    # Convert new_operator_dict entries to dense ndarray (and ensure shapes match my_m)
+    for k in list(new_operator_dict.keys()):
+        new_operator_dict[k] = np.asarray(new_operator_dict[k], dtype=complex)
 
-    # return new block, energy (superblock), entropy for L = sys_enl.length, and full evals_rho
-    return newblock, energy, S, evals_rho
+    newblock = Block(length=sys_enl.length,
+                     basis_size=my_m,
+                     operator_dict=new_operator_dict)
+
+    return newblock, energy, entropy
+
 
 def graphic(sys_block, env_block, sys_label="l"):
-    assert sys_label in ("l","r")
-    gstr = ("=" * sys_block.length) + "**" + ("-" * env_block.length)
+
+    assert sys_label in ("l", "r")
+    graphic = ("=" * sys_block.length) + "**" + ("-" * env_block.length)
     if sys_label == "r":
-        gstr = gstr[::-1]
-    return gstr
+        graphic = graphic[::-1]
+    return graphic
 
-def finite_system_algorithm(N, m_warmup, m_sweep_list, g, verbose=False):
+
+def finite_system_algorithm_homework(L, m, g):
     """
-    Run finite-system DMRG until final sweeps specified in m_sweep_list.
-    Collect entropies S(L) during sweeps and ground state energies when superblock covers full N.
-    Returns:
-      - energies: list of energies observed when superblock size == N during sweeps
-      - entropies_dict: mapping L -> last observed S(L) (float)
-      - S_history: list of tuples (L, S) recorded over time (for more detail)
+    Finite system algorithm modified for this task.
+    Run a fixed number of scans, and collect entanglement entropy in the last scan.
     """
-    assert N % 2 == 0
-    block_disk = {}  # store left and right blocks built during infinite stage
+    assert L % 2 == 0
+    block_disk = {}
 
-    # initialize
-    block = Block(length=1, basis_size=2, operator_dict={
-        "H": np.zeros((2,2), dtype='complex128'),
-        "conn_sx": sx.astype('complex128'),
-        "conn_sy": sy.astype('complex128'),
-    })
-    block_disk[("l", block.length)] = block
-    block_disk[("r", block.length)] = block
+    # --- Warmup ---
+    block = initial_block
+    block_disk["l", block.length] = block
+    block_disk["r", block.length] = block
+    while 2 * block.length < L:
+        block, energy, _ = single_dmrg_step(block, block, m=m, g=g)
+        block_disk["l", block.length] = block
+        block_disk["r", block.length] = block
 
-    # infinite algorithm warmup to build up to L = N/2 (mirror)
-    while 2 * block.length < N:
-        if verbose:
-            print("Building (infinite) L=", block.length*2+2)
-        block, energy_dummy, S_dummy, _ = single_dmrg_step(block, block, m_warmup, g)
-        block_disk[("l", block.length)] = block
-        block_disk[("r", block.length)] = block
-        if verbose:
-            print("E/L (warmup) = ", energy_dummy / (block.length * 2))
+    # --- Sweep ---
+    m_sweep_list = [m] * 5
 
-    # Now finite sweeps
     sys_label, env_label = "l", "r"
-    sys_block = block
-    energies = []
-    entropies_dict = {}  # L -> last S(L)
-    S_history = []
+    sys_block = block; del block
+    entropies = {}
+    final_energy = 0.0
 
-    for m in m_sweep_list:
-        if verbose:
-            print("Starting sweep with m =", m)
+    for sweep_num, m_sweep in enumerate(m_sweep_list):
         while True:
-            env_block = block_disk[(env_label, N - sys_block.length - 2)]
-            # if env_block.length==1 we've reached the end -> reverse direction
+            # pick env block that complements sys_block to fill L (two central sites counted in single_dmrg_step)
+            # NOTE: index formula kept as original but be careful of keys
+            env_block = block_disk[env_label, L - sys_block.length - 2]
+
             if env_block.length == 1:
-                sys_block, env_block = env_block, sys_block
+                # special case: perform step and then turn back (but do not fall through to do another step this iteration)
+                sys_block, energy, entropy = single_dmrg_step(sys_block, env_block, m=m_sweep, g=g)
+                final_energy = energy
+
+                L_left = sys_block.length if sys_label == "l" else L - sys_block.length
+                if sweep_num == len(m_sweep_list) - 1:
+                    entropies[L_left] = entropy
+
+                block_disk[sys_label, sys_block.length] = sys_block
+                # swap roles and continue next iteration
                 sys_label, env_label = env_label, sys_label
+                sys_block, env_block = env_block, sys_block
+                continue  # IMPORTANT: avoid duplicate step in this iteration
 
-            if verbose:
-                print(graphic(sys_block, env_block, sys_label))
-            sys_block, energy, S, evals_rho = single_dmrg_step(sys_block, env_block, m, g)
+            # Normal DMRG step
+            sys_block, energy, entropy = single_dmrg_step(sys_block, env_block, m=m_sweep, g=g)
+            final_energy = energy
 
-            # record entropy at L = sys_block.length (note: single_dmrg_step returned newblock with length = sys_enl.length)
-            L_here = sys_block.length
-            entropies_dict[L_here] = S
-            S_history.append((L_here, S))
+            L_left = sys_block.length if sys_label == "l" else L - sys_block.length
+            if sweep_num == len(m_sweep_list) - 1:
+                entropies[L_left] = entropy
 
-            # If the current superblock covers full N? In this code energy corresponds to the superblock energy just computed.
-            # The superblock size is (sys_enl.length + env_enl.length) which during finite sweep should equal N at the appropriate steps.
-            # Simple reliable test: if sys_block.length + (N - sys_block.length - 2) + 2 == N, i.e., always true; so instead record energies when sys_block.length*2 == N
-            # We'll record energies when the two blocks meet in the middle: i.e., when sys_label == 'l' and 2*sys_block.length == N
-            if sys_label == "l" and 2 * L_here == N:
-                energies.append(energy)
-                if verbose:
-                    print("Recorded energy for full chain: E = {:.12f}".format(energy))
+            block_disk[sys_label, sys_block.length] = sys_block
 
-            block_disk[(sys_label, sys_block.length)] = sys_block
-
-            # check end of sweep condition
-            if sys_label == "l" and 2 * sys_block.length == N:
-                # completed a full sweep left->right->left
+            # when we reach middle (left-moving sweeps)
+            if sys_label == "l" and 2 * sys_block.length == L:
                 break
 
-    # For entropies for all L from 1..N-1, fill missing L with NaN
-    S_array = np.empty(N+1)
-    S_array[:] = np.nan
-    for L in range(1, N):
-        if L in entropies_dict:
-            S_array[L] = entropies_dict[L]
-    # return energies list and entropies array (index L)
-    return energies, S_array, S_history
+    L_values = sorted(entropies.keys())
+    S_values = [entropies[l] for l in L_values]
 
-# ---------- Utility plotting and fitting ----------
-def plot_S_vs_L(S_array, N, title, fname):
-    Ls = np.arange(1, N)
-    Svals = S_array[1:N]
-    plt.figure(figsize=(8,5))
-    plt.plot(Ls, Svals, marker='o', linestyle='-')
+    return final_energy, L_values, S_values
+
+
+def fit_function(x, c, c_prime):
+    return (c / 6) * x + c_prime
+
+
+def main():
+    np.set_printoptions(precision=8, suppress=True, threshold=10000, linewidth=200)
+    np.random.seed(0)
+
+    N = 40
+    params_to_run = [
+        (10, 0.5),
+        (10, 1.0),
+        (10, 1.5),
+        (10, 1.0),
+        (20, 1.0),
+        (30, 1.0)
+    ]
+    all_results = {}
+
+    plt.figure(figsize=(8, 6))
+    ax1 = plt.gca()
+    print("(1) and (2)")
+
+    for m, g in params_to_run:
+        energy, L_vals, S_vals = finite_system_algorithm_homework(L=N, m=m, g=g)
+        all_results[(m, g)] = (energy, L_vals, S_vals)
+
+        # Task 1
+        print(f"(N, m, g)=({N}, {m}, {g})")
+        print(f"Energy: {energy:.13f}")
+
+        L_arr_str = np.array2string(np.array(L_vals), precision=0, separator=' ', max_line_width=120)
+        print(f"L: {L_arr_str}")
+
+        S_arr_str = np.array2string(np.array(S_vals), precision=8, suppress_small=True, max_line_width=120)
+        print(f"EE: {S_arr_str}\n")
+
+        # Task 2 plotting styles (keep same as original sample mapping)
+        label = f"m={m}, g={g}"
+        style, color, zorder = '-', 'black', 1  # default
+        if m == 10 and g == 0.5: style, color, zorder = '-', 'green', 5
+        elif m == 10 and g == 1.0: style, color, zorder = '-', 'blue', 5
+        elif m == 10 and g == 1.5: style, color, zorder = '-', 'orange', 5
+        elif m == 10 and g == 1.0: style, color, zorder = '--', 'red', 3
+        elif m == 20 and g == 1.0: style, color, zorder = '--', 'purple', 3
+        elif m == 30 and g == 1.0: style, color, zorder = ':', 'cyan', 1
+
+        ax1.plot(L_vals, S_vals, marker='o', linestyle=style, color=color, label=label, markersize=4, zorder=zorder)
+
+    ax1.set_xlabel("L")
+    ax1.set_ylabel("Entanglement Entropy")
+    ax1.legend()
+    plt.savefig("Task_plot_S_vs_L.png")
+
+    # Task (3) -- fit for m=20, g=1.0
+    m_fit, g_fit = 20, 1.0
+    N_fit = N
+    try:
+        energy_fit, L_fit, S_fit = all_results[(m_fit, g_fit)]
+    except KeyError:
+        energy_fit, L_fit, S_fit = finite_system_algorithm_homework(L=N_fit, m=m_fit, g=g_fit)
+
+    L_arr = np.array(L_fit)
+    S_arr = np.array(S_fit)
+
+    x_data = np.log((N_fit / np.pi) * np.sin(np.pi * L_arr / N_fit))
+    y_data = S_arr
+    popt, pcov = curve_fit(fit_function, x_data, y_data)
+    c_fit = popt[0]
+    c_prime_fit = popt[1]
+
+    y_fit_data = fit_function(x_data, *popt)
+    r_value = np.corrcoef(y_data, y_fit_data)[0, 1]
+
+    print(f"(3): central_charge= {c_fit} intercept= {c_prime_fit} r_value= {r_value}")
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(L_arr, S_arr, 'o-')
+    S_fit_curve = fit_function(x_data, c_fit, c_prime_fit)
+    plt.plot(L_arr, S_fit_curve, '-')
     plt.xlabel("L")
-    plt.ylabel("S(L)")
-    plt.title(title)
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(fname, dpi=200)
-    plt.close()
+    plt.ylabel("Entanglement Entropy")
+    plt.savefig("Task_plot_S_vs_L_fit.png")
 
-def fit_c_from_S(S_array, N, Lmin=2, Lmax=None):
-    if Lmax is None:
-        Lmax = N-2
-    Ls = np.arange(Lmin, Lmax+1)
-    x = np.log((N/np.pi) * np.sin(np.pi * Ls / N))
-    y = S_array[Ls]
-    # remove NaN or -inf
-    mask = np.isfinite(x) & np.isfinite(y)
-    x = x[mask]; y = y[mask]
-    if len(x) < 3:
-        raise RuntimeError("Not enough points to fit")
-    # linear fit y = a * x + b
-    a, b = np.polyfit(x, y, 1)
-    c_est = 6.0 * a
-    return c_est, a, b, x, y
+    plt.figure(figsize=(8, 6))
+    plt.plot(x_data, y_data, 'o-')
+    plt.plot(x_data, fit_function(x_data, *popt), '-')
+    plt.xlabel("1/6 Log(N/pi*sin(pi*L/N))")
+    plt.ylabel("Entanglement Entropy")
+    plt.savefig("Task_plot_central_charge_fit.png")
 
-# ---------- Main runner for homework parameter sets ----------
-def run_homework(N=40, output_dir="dmrg_results", do_plots=True, verbose=False):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    plt.show()
 
-    results = {}
-
-    # Task (1): m=10, g in [0.5, 1.0, 1.5]
-    m_fixed = 10
-    gs = [0.5, 1.0, 1.5]
-    for g in gs:
-        print("Running N={}, m={}, g={}".format(N, m_fixed, g))
-        energies, S_array, S_hist = finite_system_algorithm(N=N, m_warmup=m_fixed, m_sweep_list=[m_fixed, m_fixed*2], g=g, verbose=verbose)
-        # pick last recorded energy as ground state energy
-        E_gs = energies[-1] if len(energies) > 0 else None
-        print("g={}, energies observed (last) = {}".format(g, E_gs))
-        results[("m", m_fixed, "g", g)] = {"energies": energies, "S_array": S_array, "S_history": S_hist}
-        if do_plots:
-            plot_S_vs_L(S_array, N, title=f"S(L), N={N}, m={m_fixed}, g={g}", fname=os.path.join(output_dir, f"S_L_N{N}_m{m_fixed}_g{g}.png"))
-            # save S array
-            np.savetxt(os.path.join(output_dir, f"S_L_N{N}_m{m_fixed}_g{g}.csv"), S_array, header="index L from 0..N (L=0 and L=N unused)")
-
-    # Task (2): g=1.0, m in [10,20,30]
-    g_fixed = 1.0
-    ms = [10, 20, 30]
-    for m in ms:
-        print("Running N={}, m={}, g={}".format(N, m, g_fixed))
-        energies, S_array, S_hist = finite_system_algorithm(N=N, m_warmup=m, m_sweep_list=[m, m*2], g=g_fixed, verbose=verbose)
-        E_gs = energies[-1] if len(energies) > 0 else None
-        print("m={}, energies observed (last) = {}".format(m, E_gs))
-        results[("m", m, "g", g_fixed)] = {"energies": energies, "S_array": S_array, "S_history": S_hist}
-        if do_plots:
-            plot_S_vs_L(S_array, N, title=f"S(L), N={N}, m={m}, g={g_fixed}", fname=os.path.join(output_dir, f"S_L_N{N}_m{m}_g{g_fixed}.png"))
-            np.savetxt(os.path.join(output_dir, f"S_L_N{N}_m{m}_g{g_fixed}.csv"), S_array, header="index L from 0..N (L=0 and L=N unused)")
-
-    # Task (3): for m=20, g=1.0 fit S(L) to extract c
-    key = ("m", 20, "g", 1.0)
-    if key in results:
-        S_array = results[key]["S_array"]
-        # choose range for fitting: avoid very small L and L very close to N
-        try:
-            c_est, a, b, xvals, yvals = fit_c_from_S(S_array, N, Lmin=3, Lmax=N-3)
-            print("Fitted c (m=20,g=1.0): c = {:.6f} (slope a={:.6f}, intercept b={:.6f})".format(c_est, a, b))
-            # plot fit
-            plt.figure(figsize=(8,5))
-            plt.scatter(xvals, yvals, label='data')
-            plt.plot(xvals, a*xvals + b, 'r-', label=f'fit: slope={a:.4f}')
-            plt.xlabel("ln((N/pi) sin(pi L / N))")
-            plt.ylabel("S(L)")
-            plt.legend()
-            plt.title(f"Fit for m=20,g=1.0: c={c_est:.4f}")
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f"fit_S_vs_logterm_N{N}_m20_g1.0.png"), dpi=200)
-            plt.close()
-            results[("fit", key)] = {"c": c_est, "slope": a, "intercept": b}
-        except Exception as e:
-            print("Fitting failed:", e)
-
-    # Save summary
-    np.savez(os.path.join(output_dir, "dmrg_results_summary.npz"), **{
-        f"{k}": v["S_array"] if isinstance(v, dict) and "S_array" in v else v
-        for k, v in results.items()
-    })
-    print("All done. Results saved in", output_dir)
-    return results
 
 if __name__ == "__main__":
-    # run with defaults
-    results = run_homework(N=40, output_dir="dmrg_results", do_plots=True, verbose=False)
+    main()
