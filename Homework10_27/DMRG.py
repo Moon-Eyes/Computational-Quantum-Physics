@@ -272,7 +272,7 @@ def main():
     np.set_printoptions(precision=8, suppress=True, threshold=10000, linewidth=200)
     np.random.seed(0)
 
-    N = 40
+    N = 10
     params_to_run = [
         (10, 0.5),
         (10, 1.0),
@@ -316,7 +316,7 @@ def main():
     ax1.set_xlabel("L")
     ax1.set_ylabel("Entanglement Entropy")
     ax1.legend()
-    plt.savefig("Task_plot_S_vs_L.png")
+    plt.savefig("sample_plot_S_vs_L.png")
 
     # Task (3) -- fit for m=20, g=1.0
     m_fit, g_fit = 20, 1.0
@@ -346,14 +346,14 @@ def main():
     plt.plot(L_arr, S_fit_curve, '-')
     plt.xlabel("L")
     plt.ylabel("Entanglement Entropy")
-    plt.savefig("Task_plot_S_vs_L_fit.png")
+    plt.savefig("sample_plot_S_vs_L_fit.png")
 
     plt.figure(figsize=(8, 6))
     plt.plot(x_data, y_data, 'o-')
     plt.plot(x_data, fit_function(x_data, *popt), '-')
     plt.xlabel("1/6 Log(N/pi*sin(pi*L/N))")
     plt.ylabel("Entanglement Entropy")
-    plt.savefig("Task_plot_central_charge_fit.png")
+    plt.savefig("sample_plot_central_charge_fit.png")
 
     plt.show()
 
